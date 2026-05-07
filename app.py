@@ -3,119 +3,114 @@ import pandas as pd
 from decimal import Decimal, ROUND_HALF_UP
 import datetime
 import io
+import re
 
+# Precise rounding to 2 decimal places (Round Half Up)
 def precise_round(num):
     try:
-        if pd.isna(num): return 0.0
-        return float(Decimal(str(num)).quantize(Decimal('0.00'), rounding=ROUND_HALF_UP))
-    except:
+        if num is None or pd.isna(num):
+            return 0.0
+        return float(Decimal(str(num)).quantize(Decimal('1.00'), rounding=ROUND_HALF_UP))
+    except (ValueError, TypeError, ArithmeticError):
         return 0.0
 
-st.set_page_config(page_title="SSPCRS Ireland Mapper", layout="wide")
+def clean_price(val):
+    if val is None or pd.isna(val):
+        return 0.0
+    s = str(val)
+    s = re.sub(r'[^0-9.]', '', s)
+    try:
+        return float(s) if s else 0.0
+    except ValueError:
+        return 0.0
 
+st.set_page_config(page_title="SSPCRS Ireland Mapper", layout="wide", page_icon="🇮🇪")
+
+# Styling
 st.markdown("""
 <style>
-    .main {
-        background-color: #f8fafc;
-    }
-    .stButton>button {
-        width: 100%;
-        border-radius: 5px;
-        height: 3em;
-        background-color: #10b981;
-        color: white;
-    }
+    [data-testid="stMetricValue"] { font-size: 2rem !important; font-weight: 700; color: #0F172A; }
+    .main-header { font-size: 2rem; font-weight: 300; color: #1e293b; border-bottom: 2px solid #e2e8f0; padding-bottom: 1rem; margin-bottom: 2rem; }
+    .main-header b { font-weight: 700; }
+    .stButton>button { background-color: #10b981; color: white; border: none; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🇮🇪 SSPCRS Data Transformation Tool")
-st.info("Professional tool for mapping HSE reimbursement prices to Manufacturer and Retail values.")
+st.markdown('<div class="main-header">Ireland HSE <b>SSPCRS Transformer</b></div>', unsafe_allow_html=True)
 
-st.sidebar.header("Data Inputs")
-# FIX: Use file_uploader instead of file_input
-source_file = st.sidebar.file_uploader("Upload Source Data", type=['csv', 'xlsx', 'xls'], help="Contains Code and Reimbursement Price")
-ref_file = st.sidebar.file_uploader("Upload Reference Data", type=['csv', 'xlsx', 'xls'], help="Contains PRICE_ID, Item Type, and VAT")
+# Sidebar
+with st.sidebar:
+    st.title("Configuration")
+    source_file = st.file_uploader("1. Source Data (Ireland_Source_Data)", type=['csv', 'xlsx', 'xls'])
+    ref_file = st.file_uploader("2. Reference Data (Reference_Data)", type=['csv', 'xlsx', 'xls'])
+    st.divider()
+    process_btn = st.button("🚀 PROCESS DATABASE", use_container_width=True)
 
 if source_file and ref_file:
-    if st.sidebar.button("Run Transformation Pipeline"):
+    if process_btn:
         try:
-            # Loading Source
-            if source_file.name.endswith('.csv'):
-                src_df = pd.read_csv(source_file)
-            else:
-                src_df = pd.read_excel(source_file)
+            # Data Loading
+            src_df = pd.read_csv(source_file) if source_file.name.endswith('.csv') else pd.read_excel(source_file)
+            ref_df = pd.read_csv(ref_file) if ref_file.name.endswith('.csv') else pd.read_excel(ref_file)
             
-            # Loading Reference
-            if ref_file.name.endswith('.csv'):
-                ref_df = pd.read_csv(ref_file)
-            else:
-                ref_df = pd.read_excel(ref_file)
+            # Standardize Identifiers
+            src_df['Code_Standard'] = src_df['Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+            ref_df['PRICE_ID_Standard'] = ref_df['PRICE_ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
             
-            # Data Cleaning
-            ref_df['PRICE_ID'] = ref_df['PRICE_ID'].astype(str).str.strip()
-            src_df['Code'] = src_df['Code'].astype(str).str.strip()
-            
-            # Merge
-            merged = pd.merge(src_df, ref_df, left_on='Code', right_on='PRICE_ID', how='left')
-            
-            # Calculations
+            # Pivot Merge
+            merged = pd.merge(src_df, ref_df, left_on='Code_Standard', right_on='PRICE_ID_Standard', how='left')
             effective_date = datetime.date.today().replace(day=1).strftime("%Y-%m-%d")
             
-            processed = pd.DataFrame()
-            processed['PRICE_ID'] = merged['Code']
-            processed['Brand Name'] = merged['Product Name'].fillna(merged['Code'])
+            # Mapping logic
+            results = []
+            for _, row in merged.iterrows():
+                wholesale = clean_price(row.get('Reimbursement Price', 0))
+                vat = clean_price(row.get('VAT', 0))
+                item_type = str(row.get('Item Type', 'Non-Fridge'))
+                
+                mfg_factor = 1.12 if item_type == 'Fridge' else 1.08
+                mfg_price = precise_round(wholesale / mfg_factor)
+                net_retail = precise_round(wholesale + 4.84)
+                retail_price = precise_round(net_retail * 1.23) if vat == 23 else net_retail
+                
+                results.append({
+                    "PRICE_ID": row['Code_Standard'],
+                    "Wholesale Price": precise_round(wholesale),
+                    "Manufacturer Price": mfg_price,
+                    "Retail Price without VAT": net_retail,
+                    "Retail Price": retail_price,
+                    "VAT": int(vat),
+                    "Item Type": item_type,
+                    "Brand Name": row.get('Name', ''),
+                    "Active Ingredient": row.get('INN', ''),
+                    "Effective Price Date": effective_date,
+                    "Country": "IRELAND",
+                    "Currency": "EUR",
+                    "Source Name": "HSE"
+                })
             
-            # Wholesale Price Extraction
-            processed['Wholesale Price'] = merged['Reimbursement Price'].fillna(0).astype(float)
+            final_df = pd.DataFrame(results)
             
-            # Metadata
-            item_types = merged['Item Type'].fillna('Non-Fridge').astype(str)
-            vats = merged['VAT'].fillna(0).astype(float)
+            # Analytics
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Records", len(final_df))
+            c2.metric("Coverage", f"{(final_df['Item Type'].count()/len(final_df)*100):.1f}%")
+            c3.metric("Avg Retail", f"€{final_df['Retail Price'].mean():.2f}")
+            c4.metric("Fridge Items", len(final_df[final_df['Item Type']=='Fridge']))
             
-            # Manufacturer Price
-            processed['Manufacturer Price'] = merged.apply(
-                lambda x: (float(x['Reimbursement Price']) / 1.12) if str(x['Item Type']) == 'Fridge' else (float(x['Reimbursement Price']) / 1.08),
-                axis=1
-            ).fillna(0).apply(precise_round)
+            st.subheader("📊 Manufacturer Price Distribution")
+            bins = [0, 10, 50, 100, 500, 1000]
+            labels = ['€0-10', '€10-50', '€50-100', '€100-500', '€500+']
+            final_df['Range'] = pd.cut(final_df['Manufacturer Price'], bins=bins + [float('inf')], labels=labels)
+            st.bar_chart(final_df['Range'].value_counts().reindex(labels))
             
-            # Retail Calculations
-            processed['Retail Price without VAT'] = (processed['Wholesale Price'] + 4.84).apply(precise_round)
+            st.dataframe(final_df, use_container_width=True)
             
-            processed['Retail Price'] = processed.apply(
-                lambda x: (x['Retail Price without VAT'] * 1.23) if merged.iloc[x.name]['VAT'] == 23 else x['Retail Price without VAT'],
-                axis=1
-            ).apply(precise_round)
-            
-            # Template Fillers
-            processed['Multiplication Factor'] = "1"
-            processed['Country'] = "IRELAND"
-            processed['Currency'] = "EUR"
-            processed['VAT'] = vats
-            processed['Item Type'] = item_types
-            processed['Effective Price Date'] = effective_date
-            processed['Source Name'] = "HSE"
-            
-            st.success(f"Successfully processed {len(processed)} records.")
-            
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Records", len(processed))
-            col2.metric("Avg Retail", f"€{processed['Retail Price'].mean():.2f}")
-            col3.metric(" fridge Items", len(processed[processed['Item Type'] == 'Fridge']))
-            
-            st.dataframe(processed, use_container_width=True)
-            
-            # Excel Export
+            # Export
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                processed.to_excel(writer, index=False)
+                final_df.to_excel(writer, index=False)
+            st.sidebar.download_button("📥 DOWNLOAD XLSX", output.getvalue(), "SSPCRS_Ireland_Master.xlsx", use_container_width=True)
             
-            st.download_button(
-                label="📥 Download Result (Excel)",
-                data=output.getvalue(),
-                file_name=f"SSPCRS_Ireland_{datetime.date.today().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
         except Exception as e:
-            st.error(f"Processing Error: {str(e)}")
-else:
-    st.warning("Please upload both source and reference files to start.")
+            st.error(f"Arithmetic Error: {str(e)}")
