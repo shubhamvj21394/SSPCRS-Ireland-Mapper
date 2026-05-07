@@ -4,6 +4,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import datetime
 import io
 import re
+import pip
 
 # Precise rounding to 2 decimal places (Round Half Up)
 def precise_round(num):
