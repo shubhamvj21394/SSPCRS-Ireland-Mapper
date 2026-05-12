@@ -93,7 +93,7 @@ def effective_date() -> str:
     return date.today().replace(day=1).strftime("%Y-%m-%d")
 
 
-def load_file(f) -> pd.DataFrame | None:
+def load_file(f):
     if f is None:
         return None
     name = f.name.lower()
